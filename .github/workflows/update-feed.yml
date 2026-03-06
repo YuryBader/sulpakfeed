@@ -1,0 +1,122 @@
+name: Update Sulpak Catalog Feed
+
+on:
+  schedule:
+    # Каждые 6 часов
+    - cron: '0 */6 * * *'
+  workflow_dispatch: # Ручной запуск
+
+jobs:
+  update-feed:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Download and parse feed
+        run: |
+          cat << 'SCRIPT' > parse-feed.mjs
+          import { createWriteStream } from 'fs';
+          import { writeFile } from 'fs/promises';
+
+          const FEED_URL = "https://object.pscloud.io/cms/cms/Export/catalog-full.xml";
+
+          console.log("Downloading feed...");
+          const resp = await fetch(FEED_URL);
+          if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+
+          const reader = resp.body.getReader();
+          const decoder = new TextDecoder("utf-8");
+          const items = [];
+
+          let buffer = "";
+          let searchFrom = 0;
+
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+
+            while (true) {
+              const offerStart = buffer.indexOf("<offer ", searchFrom);
+              if (offerStart === -1) {
+                if (buffer.length > 500) {
+                  const keepFrom = Math.max(0, buffer.length - 200);
+                  buffer = buffer.slice(keepFrom);
+                  searchFrom = 0;
+                }
+                break;
+              }
+              const offerEnd = buffer.indexOf("</offer>", offerStart);
+              if (offerEnd === -1) { searchFrom = offerStart; break; }
+
+              const xml = buffer.slice(offerStart, offerEnd + 8);
+              const item = parseOffer(xml);
+              if (item) items.push(item);
+              searchFrom = offerEnd + 8;
+            }
+
+            if (searchFrom > 10000) {
+              buffer = buffer.slice(searchFrom);
+              searchFrom = 0;
+            }
+          }
+
+          console.log(`Parsed ${items.length} items`);
+
+          const output = {
+            count: items.length,
+            ts: new Date().toISOString(),
+            items,
+          };
+
+          await writeFile("docs/catalog.json", JSON.stringify(output));
+          console.log("Saved to docs/catalog.json");
+
+          function parseOffer(xml) {
+            const idMatch = xml.match(/id="(\d+)"/);
+            if (!idMatch) return null;
+            const name = extractTag(xml, "name");
+            if (!name) return null;
+            return {
+              i: idMatch[1],
+              n: name,
+              m: extractTag(xml, "model") || "",
+              v: extractTag(xml, "vendor") || "",
+              p: Number(extractTag(xml, "price")) || 0,
+              a: !xml.includes('available="false"'),
+            };
+          }
+
+          function extractTag(xml, tag) {
+            const start = xml.indexOf("<" + tag + ">");
+            if (start === -1) return null;
+            const contentStart = start + tag.length + 2;
+            const end = xml.indexOf("</" + tag + ">", contentStart);
+            if (end === -1) return null;
+            return xml.slice(contentStart, end).trim()
+              .replace(/&amp;/g, "&").replace(/&lt;/g, "<")
+              .replace(/&gt;/g, ">").replace(/&quot;/g, '"')
+              .replace(/&apos;/g, "'");
+          }
+          SCRIPT
+
+          mkdir -p docs
+          node parse-feed.mjs
+
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add docs/catalog.json
+          # Коммитим только если файл изменился
+          git diff --staged --quiet || git commit -m "Update catalog $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          git push
