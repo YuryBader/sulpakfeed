@@ -92,6 +92,7 @@ jobs:
               m: extractTag(xml, "model") || "",
               v: extractTag(xml, "vendor") || "",
               p: Number(extractTag(xml, "price")) || 0,
+              u: extractTag(xml, "url") || "",
               a: !xml.includes('available="false"'),
             };
           }
